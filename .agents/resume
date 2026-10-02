@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Snapshots preserve dependencies; waking an orb must not reinstall them.
+set -euo pipefail
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+
+if [[ ! -x node_modules/.bin/tsc || ! -x node_modules/.bin/playwright ]]; then
+  echo 'Orb dependencies are missing. Run .agents/setup before building or testing.' >&2
+  exit 1
+fi
+echo 'Orb dependencies ready; no services or authentication needed for demo tests.'
