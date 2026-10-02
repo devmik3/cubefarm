@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# Prepare snapshot-safe dependencies; never start or authenticate an office here.
+set -euo pipefail
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+
+TIMEFORMAT='  completed in %3R seconds'
+echo 'Preparing Node 24 (matching CI)'
+# Keep the orb's system Node intact. Playwright 1.56 extraction hangs on Node 26.
+toolchain="$HOME/.local/share/cubefarm-node24"
+if [[ ! -x "$toolchain/node_modules/.bin/node" ]]; then
+  time npm install --prefix "$toolchain" --no-audit --no-fund node@24
+fi
+export PATH="$toolchain/node_modules/.bin:$PATH"
+
+# Amp and supervised services start in separate login shells.
+profile_marker="# cubefarm orb toolchain: $PWD"
+if ! grep -Fqx "$profile_marker" "$HOME/.bash_profile" 2>/dev/null; then
+  {
+    printf '\n%s\n' "$profile_marker"
+    printf 'case "$PWD/" in %q/*)\n' "$PWD"
+    printf '  case ":$PATH:" in *:%q:*) ;; *) export PATH=%q:"$PATH" ;; esac\n' "$toolchain/node_modules/.bin" "$toolchain/node_modules/.bin"
+    printf 'esac\n'
+  } >> "$HOME/.bash_profile"
+fi
+node --version
+npm --version
+
+echo 'Preparing npm dependencies'
+# A warm npm ci still deletes and reinstalls every package (about 9 seconds).
+# Keep this marker inside node_modules so removing dependencies invalidates it.
+fingerprint=$({ sha256sum package.json package-lock.json; node --version; npm --version; } | sha256sum | cut -d ' ' -f 1)
+marker=node_modules/.amp-setup-fingerprint
+if [[ ! -f "$marker" || "$(cat "$marker")" != "$fingerprint" || ! -x node_modules/.bin/tsc || ! -x node_modules/.bin/playwright ]]; then
+  time npm ci --include=dev --no-audit --no-fund
+  printf '%s\n' "$fingerprint" > "$marker"
+else
+  echo '  Lockfiles and tool versions unchanged; reusing node_modules'
+fi
+
+echo 'Preparing Chromium system libraries and fonts'
+# Playwright 1.56's Debian 12 Chromium dependencies (matching CI's install-deps).
+packages=(
+  libasound2 libatk-bridge2.0-0 libatk1.0-0 libatspi2.0-0 libcairo2 libcups2
+  libdbus-1-3 libdrm2 libgbm1 libglib2.0-0 libnspr4 libnss3 libpango-1.0-0
+  libx11-6 libxcb1 libxcomposite1 libxdamage1 libxext6 libxfixes3 libxkbcommon0
+  libxrandr2 xvfb fonts-noto-color-emoji fonts-unifont libfontconfig1 libfreetype6
+  xfonts-scalable fonts-liberation fonts-ipafont-gothic fonts-wqy-zenhei
+  fonts-tlwg-loma-otf fonts-freefont-ttf
+)
+missing=()
+for package in "${packages[@]}"; do
+  if [[ "$(dpkg-query -W -f='${Status}' "$package" 2>/dev/null || true)" != 'install ok installed' ]]; then
+    missing+=("$package")
+  fi
+done
+if (( ${#missing[@]} )); then
+  time sudo -n apt-get update
+  time sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${missing[@]}"
+else
+  echo '  System dependencies already installed'
+fi
+
+echo 'Preparing the lockfile-matched Playwright browser (cached on warm runs)'
+time ./node_modules/.bin/playwright install chromium
+echo 'Orb ready: npm run typecheck, npm test, npm run build, npm run test:e2e'
